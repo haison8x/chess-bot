@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "Chess Hint",
+  "version": "1.1.0",
+  "description": "Betafish engine hints overlay for chess.com",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": ["sidePanel", "scripting", "storage", "tabs"],
+  "host_permissions": ["https://www.chess.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.chess.com/*"],
+      "js": ["content/content.js"],
+      "css": ["content/highlight.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "side_panel": {
+    "default_path": "sidepanel/sidepanel.html"
+  },
+  "action": {
+    "default_title": "Chess Hint",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["betafish.js", "chess.js"],
+      "matches": ["https://www.chess.com/*"]
+    }
+  ]
+}

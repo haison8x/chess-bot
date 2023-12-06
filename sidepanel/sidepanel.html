@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chess Hint</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+<div id="banner" class="banner hidden">
+    <span>♟ Open <strong>chess.com</strong> to use hints</span>
+    <a id="banner-open" href="https://www.chess.com" target="_blank">Open →</a>
+  </div>
+
+  <section class="card playing-as-card">
+    <span class="section-label">Playing as</span>
+    <span id="color-label" class="color-label">—</span>
+    <span id="status-dot" class="dot idle" title="Idle"></span>
+  </section>
+
+  <section class="card">
+    <label class="section-label" for="time-select">Thinking time</label>
+    <select id="time-select">
+      <option value="1">1 s</option>
+      <option value="2">2 s</option>
+      <option value="3" selected>3 s</option>
+      <option value="4">4 s</option>
+      <option value="5">5 s</option>
+      <option value="6">6 s</option>
+      <option value="7">7 s</option>
+      <option value="8">8 s</option>
+      <option value="9">9 s</option>
+    </select>
+  </section>
+
+  <section class="card actions">
+    <button id="btn-hint" class="btn primary">▶ Hint</button>
+    <button id="btn-auto" class="btn" data-active="false">⟳ Auto</button>
+    <button id="btn-clear-hl" class="btn ghost">⬜ Clear</button>
+    <button id="btn-clear" class="btn ghost">✕ Log</button>
+  </section>
+
+  <section class="card actions">
+    <button id="btn-check" class="btn">⚙ Check</button>
+    <button id="btn-reload" class="btn ghost">↺ Reload ext</button>
+  </section>
+
+  <section class="log-section">
+    <div class="section-label row-between">
+      <span>Log</span>
+      <span id="log-count">0</span>
+    </div>
+    <div id="log" role="log" aria-live="polite"></div>
+  </section>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>
