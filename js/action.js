@@ -2221,18 +2221,19 @@ function getBestMove(game, color, currSum) {
  * Event listeners for various buttons.
  */
 
+/*
+ * Event listeners for various buttons.
+ */
 
 jQuery('#player-bottom').off('click')
 jQuery('#player-bottom').on('click', function () {
   var pgn = getCurrentPgn()
-  
+
   //1. d3 e5 2. e4 d6
   game.reset()
   for (let i = 0; i < pgn.length; i++) {
-    game.move(pgn[i])    
+    game.move(pgn[i])
   }
-
-  console.log(game.ascii())
 
   if (game.in_checkmate() || game.in_draw() || game.in_threefold_repetition() || game.in_stalemate()) {
     return false
@@ -2240,7 +2241,7 @@ jQuery('#player-bottom').on('click', function () {
 
   var turn = game.turn()
   var move = getBestMove(game, turn, 0)[0]
-  
+
   jQuery('.player-row-top .user-username-component').text(move.from + '->' + move.to)
 
   highlightMove(move.from)
@@ -2256,8 +2257,11 @@ function getCurrentPgn() {
     jQuery(e)
       .find('div')
       .each(function (i1, e1) {
+        let icon = jQuery(e1).find(".icon-font-chess").data("figurine");
+
         let move = jQuery(e1).text()
-        move = move.trim()
+        move = (icon ? icon : "") + move.trim()
+
         pgn.push(move)
       })
   })
@@ -2271,7 +2275,7 @@ function toCoordinates(move) {
   return [number, parseInt(move[1])]
 }
 
-function highlightMove(move){
+function highlightMove(move) {
   let coordinates = toCoordinates(move)
   jQuery('#board-layout-chessboard .square-' + coordinates[0] + coordinates[1]).css('background-color', 'red')
 }
