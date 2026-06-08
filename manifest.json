@@ -36,7 +36,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["betafish.js", "chess.js"],
+      "resources": ["betafish.js", "chess.js", "stockfish.js", "stockfish.wasm"],
       "matches": ["https://www.chess.com/*"]
     }
   ]

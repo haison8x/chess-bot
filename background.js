@@ -112,7 +112,7 @@ chrome.runtime.onConnect.addListener((port) => {
       return;
     }
 
-    if (['GET_HINT', 'SET_AUTO', 'SET_TIME', 'CLEAR_HIGHLIGHT'].includes(msg.type)) {
+    if (['GET_HINT', 'SET_AUTO', 'SET_TIME', 'SET_ENGINE', 'CLEAR_HIGHLIGHT'].includes(msg.type)) {
       const tab = await getActiveTab();
       if (!isChessCom(tab?.url)) {
         log('error', 'Open chess.com first');

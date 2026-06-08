@@ -4,6 +4,7 @@ const btnClearHl = document.getElementById('btn-clear-hl');
 const btnClear   = document.getElementById('btn-clear');
 const btnCheck   = document.getElementById('btn-check');
 const btnReload  = document.getElementById('btn-reload');
+const engineSelect = document.getElementById('engine-select');
 const timeSelect = document.getElementById('time-select');
 const logEl      = document.getElementById('log');
 const logCount   = document.getElementById('log-count');
@@ -65,8 +66,12 @@ function send(msg) {
 
 // ─── Persistence ─────────────────────────────────────────────────────────────
 
-chrome.storage.local.get(['thinkingTime'], (data) => {
+chrome.storage.local.get(['thinkingTime', 'engine'], (data) => {
   if (data.thinkingTime) timeSelect.value = String(data.thinkingTime);
+
+  const engine = data.engine || 'betafish';
+  engineSelect.value = engine;
+  send({ type: 'SET_ENGINE', engine });
 });
 
 // ─── UI Helpers ───────────────────────────────────────────────────────────────
@@ -144,6 +149,12 @@ btnCheck.addEventListener('click', () => send({ type: 'CHECK' }));
 btnReload.addEventListener('click', () => {
   appendLog('info', 'Reloading extension…');
   setTimeout(() => chrome.runtime.reload(), 300);
+});
+
+engineSelect.addEventListener('change', () => {
+  const engine = engineSelect.value;
+  chrome.storage.local.set({ engine });
+  send({ type: 'SET_ENGINE', engine });
 });
 
 timeSelect.addEventListener('change', () => {

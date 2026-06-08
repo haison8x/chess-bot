@@ -17,12 +17,13 @@ if (window.__chessHintLoaded) {
     91: 'A8', 92: 'B8', 93: 'C8', 94: 'D8', 95: 'E8', 96: 'F8', 97: 'G8', 98: 'H8',
   };
 
-  let worker = null;
-  let myColor = WHITE;
-  let thinkingTime = 3;
-  let autoInterval = null;
-  let lastPgn = '';
-  let isThinking = false;
+  let worker        = null;
+  let engineType    = 'betafish';
+  let myColor       = WHITE;
+  let thinkingTime  = 3;
+  let autoInterval  = null;
+  let lastPgn       = '';
+  let isThinking    = false;
   let contextInvalid = false;
 
   // ─── Context guard ────────────────────────────────────────────────────────────
@@ -42,9 +43,9 @@ if (window.__chessHintLoaded) {
     }
   }
 
-  // ─── Worker ───────────────────────────────────────────────────────────────────
+  // ─── Workers ──────────────────────────────────────────────────────────────────
 
-  function buildWorkerBlob(betafishUrl, chessUrl) {
+  function buildBetafishWorkerBlob(betafishUrl, chessUrl) {
     const code = `
 let myGame = null, Chess = null, thinkingTime = 3;
 
@@ -59,7 +60,7 @@ const initPromise = (async () => {
   throw err;
 });
 
-self.onmessage = async function (e) {
+self.onmessage = async function(e) {
   const { type } = e.data;
 
   if (type === 'SET_TIME') {
@@ -93,6 +94,7 @@ self.onmessage = async function (e) {
         self.postMessage({ type: 'GAME_OVER', text: String(status.over), side: status.sideToMove });
         return;
       }
+      self.postMessage({ type: 'LOG', text: 'Thinking... (' + thinkingTime + 's)' });
       const bestMove = myGame.getBestMove();
       if (!bestMove) { self.postMessage({ type: 'ERROR', text: 'No legal moves found' }); return; }
       self.postMessage({ type: 'RESULT', from: myGame.fromSQ(bestMove), to: myGame.toSQ(bestMove), side: status.sideToMove, fen });
@@ -105,18 +107,93 @@ self.onmessage = async function (e) {
     return new Blob([code], { type: 'application/javascript' });
   }
 
+  function buildStockfishWorkerBlob(sfJsUrl, sfWasmUrl, chessUrl) {
+    // Inner blob: just sets locateFile so WASM is resolved correctly, then imports Stockfish.
+    // Stockfish takes over self.onmessage and speaks raw UCI.
+    const innerCode = `var Module={locateFile:function(){return ${JSON.stringify(sfWasmUrl)}}};importScripts(${JSON.stringify(sfJsUrl)});`;
+
+    // Outer blob: UCI adapter. Owns self.onmessage from our app, talks to inner worker in UCI.
+    const code = `
+let Chess = null, sfWorker = null, sfReady = false;
+let pendingResolve = null, pendingCompute = null;
+
+const chessReady = import(${JSON.stringify(chessUrl)}).then(m => { Chess = m.Chess; });
+
+const sfBlob = new Blob([${JSON.stringify(innerCode)}], { type: 'application/javascript' });
+const sfBlobUrl = URL.createObjectURL(sfBlob);
+sfWorker = new Worker(sfBlobUrl);
+URL.revokeObjectURL(sfBlobUrl);
+
+sfWorker.onmessage = function(e) {
+  const line = e.data;
+  if (typeof line !== 'string') return;
+  if (line === 'readyok') {
+    sfReady = true;
+    if (pendingCompute) { const d = pendingCompute; pendingCompute = null; doCompute(d); }
+    return;
+  }
+  if (line.startsWith('bestmove')) {
+    const mv = line.split(' ')[1];
+    if (pendingResolve) { pendingResolve(mv); pendingResolve = null; }
+  }
+};
+
+sfWorker.postMessage('uci');
+sfWorker.postMessage('isready');
+
+async function doCompute({ pgn, time }) {
+  await chessReady;
+  const chess = new Chess();
+  let fen;
+  if (pgn && pgn.trim()) {
+    if (!chess.load_pgn(pgn)) {
+      self.postMessage({ type: 'ERROR', text: 'PGN parse failed' });
+      return;
+    }
+    fen = chess.fen();
+  } else {
+    fen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+  }
+  const side = fen.split(' ')[1] === 'w' ? 'white' : 'black';
+  sfWorker.postMessage('ucinewgame');
+  sfWorker.postMessage('position fen ' + fen);
+  self.postMessage({ type: 'LOG', text: 'Thinking... (' + time + 's)' });
+  const bestMove = await new Promise(r => { pendingResolve = r; sfWorker.postMessage('go movetime ' + (time * 1000)); });
+  if (!bestMove || bestMove === '(none)') {
+    self.postMessage({ type: 'GAME_OVER', text: 'No legal moves', side });
+    return;
+  }
+  self.postMessage({ type: 'RESULT_ALG', from: bestMove.slice(0, 2).toUpperCase(), to: bestMove.slice(2, 4).toUpperCase(), side });
+}
+
+self.onmessage = async function(e) {
+  if (e.data.type === 'COMPUTE') {
+    if (!sfReady) { pendingCompute = e.data; return; }
+    await doCompute(e.data);
+  }
+};
+`;
+    return new Blob([code], { type: 'application/javascript' });
+  }
+
   function initWorker() {
     if (worker || !isContextValid()) return;
 
-    const betafishUrl = chrome.runtime.getURL('betafish.js');
     const chessUrl = chrome.runtime.getURL('chess.js');
-    const blobUrl = URL.createObjectURL(buildWorkerBlob(betafishUrl, chessUrl));
+    const blob = engineType === 'stockfish'
+      ? buildStockfishWorkerBlob(
+          chrome.runtime.getURL('stockfish.js'),
+          chrome.runtime.getURL('stockfish.wasm'),
+          chessUrl
+        )
+      : buildBetafishWorkerBlob(chrome.runtime.getURL('betafish.js'), chessUrl);
 
+    const blobUrl = URL.createObjectURL(blob);
     try {
       worker = new Worker(blobUrl);
       URL.revokeObjectURL(blobUrl);
       worker.onmessage = handleWorkerMessage;
-      worker.onerror = (e) => { isThinking = false; sendLog('error', 'Worker error: ' + (e.message || e.type)); };
+      worker.onerror   = (e) => { isThinking = false; sendLog('error', 'Worker error: ' + (e.message || e.type)); };
     } catch (e) {
       URL.revokeObjectURL(blobUrl);
       worker = null;
@@ -127,11 +204,22 @@ self.onmessage = async function (e) {
   function handleWorkerMessage(e) {
     const msg = e.data;
     switch (msg.type) {
-      case 'RESULT':
+      case 'RESULT': {
+        isThinking = false;
+        const fromAlg = sq120ToAlg(msg.from);
+        const toAlg   = sq120ToAlg(msg.to);
+        highlightBestMove(fromAlg, toAlg, msg.side);
+        sendLog('move', fromAlg + ' → ' + toAlg + ' (' + msg.side + ')');
+        chrome.runtime.sendMessage({ type: 'RESULT' }).catch(() => {});
+        break;
+      }
+      case 'RESULT_ALG': {
         isThinking = false;
         highlightBestMove(msg.from, msg.to, msg.side);
-        sendLog('move', sq120ToAlg(msg.from) + ' → ' + sq120ToAlg(msg.to) + ' (' + msg.side + ')');
+        sendLog('move', msg.from + ' → ' + msg.to + ' (' + msg.side + ')');
+        chrome.runtime.sendMessage({ type: 'RESULT' }).catch(() => {});
         break;
+      }
       case 'GAME_OVER':
         isThinking = false;
         resetHighlight();
@@ -150,11 +238,11 @@ self.onmessage = async function (e) {
 
   // ─── DOM Helpers ──────────────────────────────────────────────────────────────
 
-  function qs(selector, root) { return (root || document).querySelector(selector); }
+  function qs(selector, root)  { return (root || document).querySelector(selector); }
   function qsa(selector, root) { return Array.from((root || document).querySelectorAll(selector)); }
 
   function getCurrentPgn() {
-    let pgn = '';
+    let pgn     = '';
     let counter = 1;
 
     qsa('#live-game-tab-scroll-container .move-list-row').forEach((row) => {
@@ -194,7 +282,7 @@ self.onmessage = async function (e) {
   }
 
   function isMyTurn() {
-    const halfMoves = qsa('#live-game-tab-scroll-container .move-list-row .node').length;
+    const halfMoves  = qsa('#live-game-tab-scroll-container .move-list-row .node').length;
     const sideToMove = (halfMoves % 2 === 0) ? WHITE : BLACK;
     return myColor === sideToMove;
   }
@@ -212,26 +300,24 @@ self.onmessage = async function (e) {
     return 'square-' + fileNum + rankNum;
   }
 
-  function highlightBestMove(fromSq, toSq, side) {
+  function highlightBestMove(fromAlg, toAlg) {
     resetHighlight();
-    const fromAlg = sq120ToAlg(fromSq);
-    const toAlg = sq120ToAlg(toSq);
     if (!fromAlg || !toAlg) return;
 
     const board = qs('#board-layout-chessboard');
     if (!board) return;
 
     const fromClass = algToChesscomClass(fromAlg);
-    const toClass = algToChesscomClass(toAlg);
+    const toClass   = algToChesscomClass(toAlg);
 
     if (fromClass) qs('.' + fromClass, board)?.classList.add('chess-hint-from');
-    if (toClass) qs('.' + toClass, board)?.classList.add('chess-hint-to');
+    if (toClass)   qs('.' + toClass,   board)?.classList.add('chess-hint-to');
 
-    drawArrow(board, fromAlg, toAlg, side);
+    drawArrow(board, fromAlg, toAlg);
   }
 
   function drawArrow(board, fromAlg, toAlg) {
-    const sqW = board.offsetWidth / 8;
+    const sqW = board.offsetWidth  / 8;
     const sqH = board.offsetHeight / 8;
 
     function sqCenter(alg) {
@@ -241,27 +327,27 @@ self.onmessage = async function (e) {
       return { x: fileIdx * sqW + sqW / 2, y: (7 - rankIdx) * sqH + sqH / 2 };
     }
 
-    const from = sqCenter(fromAlg);
-    const to = sqCenter(toAlg);
-    const dx = to.x - from.x;
-    const dy = to.y - from.y;
-    const len = Math.sqrt(dx * dx + dy * dy);
+    const from  = sqCenter(fromAlg);
+    const to    = sqCenter(toAlg);
+    const dx    = to.x - from.x;
+    const dy    = to.y - from.y;
+    const len   = Math.sqrt(dx * dx + dy * dy);
     const angle = Math.atan2(dy, dx) * (180 / Math.PI);
     const arrowW = Math.max(4, sqW * 0.12);
 
     const arrow = document.createElement('div');
     arrow.className = 'chess-hint-arrow';
     Object.assign(arrow.style, {
-      position: 'absolute',
-      left: from.x + 'px',
-      top: from.y + 'px',
-      width: len + 'px',
-      height: arrowW + 'px',
-      marginTop: -(arrowW / 2) + 'px',
+      position:        'absolute',
+      left:            from.x + 'px',
+      top:             from.y + 'px',
+      width:           len + 'px',
+      height:          arrowW + 'px',
+      marginTop:       -(arrowW / 2) + 'px',
       transformOrigin: '0 50%',
-      transform: 'rotate(' + angle + 'deg)',
-      pointerEvents: 'none',
-      zIndex: '1000',
+      transform:       'rotate(' + angle + 'deg)',
+      pointerEvents:   'none',
+      zIndex:          '1000',
     });
 
     board.style.position = 'relative';
@@ -287,7 +373,7 @@ self.onmessage = async function (e) {
     const detected = detectPlayerColor();
     if (detected !== null) {
       myColor = detected;
-      chrome.runtime.sendMessage({ type: 'COLOR_DETECTED', color: myColor }).catch(() => { });
+      chrome.runtime.sendMessage({ type: 'COLOR_DETECTED', color: myColor }).catch(() => {});
     }
 
     initWorker();
@@ -295,6 +381,7 @@ self.onmessage = async function (e) {
 
     resetHighlight();
     isThinking = true;
+    sendLog('info', 'Computing hint…');
     worker.postMessage({ type: 'COMPUTE', pgn: getCurrentPgn(), time: thinkingTime });
   }
 
@@ -310,7 +397,7 @@ self.onmessage = async function (e) {
   function sendLog(level, text) {
     if (contextInvalid) return;
     try {
-      chrome.runtime.sendMessage({ type: 'LOG', level, text }).catch(() => { });
+      chrome.runtime.sendMessage({ type: 'LOG', level, text }).catch(() => {});
     } catch {
       isContextValid();
     }
@@ -342,6 +429,13 @@ self.onmessage = async function (e) {
         thinkingTime = msg.seconds;
         if (worker) worker.postMessage({ type: 'SET_TIME', seconds: msg.seconds });
         sendLog('info', 'Thinking time: ' + msg.seconds + 's');
+        break;
+
+      case 'SET_ENGINE':
+        engineType = msg.engine;
+        if (worker) { worker.terminate(); worker = null; }
+        isThinking = false;
+        sendLog('info', 'Engine: ' + msg.engine);
         break;
 
       case 'CLEAR_HIGHLIGHT':
