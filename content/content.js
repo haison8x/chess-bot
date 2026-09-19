@@ -26,6 +26,24 @@ if (window.__chessHintLoaded) {
   let isThinking    = false;
   let contextInvalid = false;
 
+  // chess.js loaded once in content script — workers receive FEN directly
+  let Chess      = null;
+  let chessReady = null;
+
+  function ensureChess() {
+    if (!chessReady) {
+      chessReady = import(chrome.runtime.getURL('chess.js')).then(m => { Chess = m.Chess; });
+    }
+    return chessReady;
+  }
+
+  async function pgnToFen(pgn) {
+    await ensureChess();
+    if (!pgn.trim()) return 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+    const chess = new Chess();
+    return chess.load_pgn(pgn) ? chess.fen() : null;
+  }
+
   // ─── Context guard ────────────────────────────────────────────────────────────
 
   function isContextValid() {
@@ -44,85 +62,52 @@ if (window.__chessHintLoaded) {
   }
 
   // ─── Workers ──────────────────────────────────────────────────────────────────
+  // Workers receive FEN (not PGN) — chess.js stays in content script only.
 
-  function buildBetafishWorkerBlob(betafishUrl, chessUrl) {
+  function buildBetafishWorkerBlob(betafishUrl) {
     const code = `
-let myGame = null, Chess = null, thinkingTime = 3;
+importScripts(${JSON.stringify(betafishUrl)});
+let myGame = new engine();
+let thinkingTime = 3;
 
-const initPromise = (async () => {
-  importScripts(${JSON.stringify(betafishUrl)});
-  const mod = await import(${JSON.stringify(chessUrl)});
-  Chess = mod.Chess;
-  myGame = new engine();
-  myGame.setThinkingTime(thinkingTime);
-})().catch(err => {
-  self.postMessage({ type: 'ERROR', text: 'Engine init failed: ' + err.message });
-  throw err;
-});
-
-self.onmessage = async function(e) {
-  const { type } = e.data;
-
-  if (type === 'SET_TIME') {
+self.onmessage = function(e) {
+  if (e.data.type === 'SET_TIME') {
     thinkingTime = e.data.seconds;
-    if (myGame) myGame.setThinkingTime(thinkingTime);
+    myGame.setThinkingTime(thinkingTime);
     return;
   }
-
-  if (type === 'COMPUTE') {
-    const { pgn, time } = e.data;
-    try {
-      await initPromise;
-      if (time != null) { thinkingTime = time; myGame.setThinkingTime(thinkingTime); }
-
-      const chess = new Chess();
-      let fen;
-      if (pgn && pgn.trim()) {
-        if (!chess.load_pgn(pgn)) {
-          self.postMessage({ type: 'ERROR', text: 'PGN parse failed: ' + pgn.slice(0, 60) });
-          return;
-        }
-        fen = chess.fen();
-      } else {
-        fen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
-      }
-
-      myGame.reset();
-      myGame.setFEN(fen);
-      const status = myGame.gameStatus();
-      if (status.over) {
-        self.postMessage({ type: 'GAME_OVER', text: String(status.over), side: status.sideToMove });
-        return;
-      }
-      self.postMessage({ type: 'LOG', text: 'Thinking... (' + thinkingTime + 's)' });
-      const bestMove = myGame.getBestMove();
-      if (!bestMove) { self.postMessage({ type: 'ERROR', text: 'No legal moves found' }); return; }
-      self.postMessage({ type: 'RESULT', from: myGame.fromSQ(bestMove), to: myGame.toSQ(bestMove), side: status.sideToMove, fen });
-    } catch (err) {
-      self.postMessage({ type: 'ERROR', text: err.message });
+  if (e.data.type === 'COMPUTE_FEN') {
+    const { fen, time } = e.data;
+    if (time != null) { thinkingTime = time; myGame.setThinkingTime(thinkingTime); }
+    myGame.reset();
+    myGame.setFEN(fen);
+    const status = myGame.gameStatus();
+    if (status.over) {
+      self.postMessage({ type: 'GAME_OVER', text: String(status.over), side: status.sideToMove });
+      return;
     }
+    self.postMessage({ type: 'LOG', text: 'Thinking... (' + thinkingTime + 's)' });
+    const bestMove = myGame.getBestMove();
+    if (!bestMove) { self.postMessage({ type: 'ERROR', text: 'No legal moves found' }); return; }
+    self.postMessage({ type: 'RESULT', from: myGame.fromSQ(bestMove), to: myGame.toSQ(bestMove), side: status.sideToMove });
   }
 };
 `;
     return new Blob([code], { type: 'application/javascript' });
   }
 
-  function buildStockfishWorkerBlob(sfJsUrl, sfWasmUrl, chessUrl) {
-    // Inner blob: just sets locateFile so WASM is resolved correctly, then imports Stockfish.
+  function buildStockfishWorkerBlob(sfJsUrl, sfWasmUrl) {
+    // Inner blob: patches Module.locateFile so stockfish finds its .wasm, then imports stockfish.
     // Stockfish takes over self.onmessage and speaks raw UCI.
     const innerCode = `var Module={locateFile:function(){return ${JSON.stringify(sfWasmUrl)}}};importScripts(${JSON.stringify(sfJsUrl)});`;
 
-    // Outer blob: UCI adapter. Owns self.onmessage from our app, talks to inner worker in UCI.
+    // Outer blob: UCI proxy. Receives { type:'COMPUTE_FEN', fen, time }, talks to inner worker in UCI.
     const code = `
-let Chess = null, sfWorker = null, sfReady = false;
+let sfWorker = null, sfReady = false;
 let pendingResolve = null, pendingCompute = null;
 
-const chessReady = import(${JSON.stringify(chessUrl)}).then(m => { Chess = m.Chess; });
-
 const sfBlob = new Blob([${JSON.stringify(innerCode)}], { type: 'application/javascript' });
-const sfBlobUrl = URL.createObjectURL(sfBlob);
-sfWorker = new Worker(sfBlobUrl);
-URL.revokeObjectURL(sfBlobUrl);
+sfWorker = new Worker(URL.createObjectURL(sfBlob));
 
 sfWorker.onmessage = function(e) {
   const line = e.data;
@@ -141,35 +126,25 @@ sfWorker.onmessage = function(e) {
 sfWorker.postMessage('uci');
 sfWorker.postMessage('isready');
 
-async function doCompute({ pgn, time }) {
-  await chessReady;
-  const chess = new Chess();
-  let fen;
-  if (pgn && pgn.trim()) {
-    if (!chess.load_pgn(pgn)) {
-      self.postMessage({ type: 'ERROR', text: 'PGN parse failed' });
-      return;
-    }
-    fen = chess.fen();
-  } else {
-    fen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
-  }
+function doCompute({ fen, time }) {
   const side = fen.split(' ')[1] === 'w' ? 'white' : 'black';
   sfWorker.postMessage('ucinewgame');
   sfWorker.postMessage('position fen ' + fen);
   self.postMessage({ type: 'LOG', text: 'Thinking... (' + time + 's)' });
-  const bestMove = await new Promise(r => { pendingResolve = r; sfWorker.postMessage('go movetime ' + (time * 1000)); });
-  if (!bestMove || bestMove === '(none)') {
-    self.postMessage({ type: 'GAME_OVER', text: 'No legal moves', side });
-    return;
-  }
-  self.postMessage({ type: 'RESULT_ALG', from: bestMove.slice(0, 2).toUpperCase(), to: bestMove.slice(2, 4).toUpperCase(), side });
+  new Promise(r => { pendingResolve = r; sfWorker.postMessage('go movetime ' + (time * 1000)); })
+    .then(bestMove => {
+      if (!bestMove || bestMove === '(none)') {
+        self.postMessage({ type: 'GAME_OVER', text: 'No legal moves', side });
+        return;
+      }
+      self.postMessage({ type: 'RESULT_ALG', from: bestMove.slice(0, 2).toUpperCase(), to: bestMove.slice(2, 4).toUpperCase(), side });
+    });
 }
 
-self.onmessage = async function(e) {
-  if (e.data.type === 'COMPUTE') {
+self.onmessage = function(e) {
+  if (e.data.type === 'COMPUTE_FEN') {
     if (!sfReady) { pendingCompute = e.data; return; }
-    await doCompute(e.data);
+    doCompute(e.data);
   }
 };
 `;
@@ -179,14 +154,12 @@ self.onmessage = async function(e) {
   function initWorker() {
     if (worker || !isContextValid()) return;
 
-    const chessUrl = chrome.runtime.getURL('chess.js');
     const blob = engineType === 'stockfish'
       ? buildStockfishWorkerBlob(
           chrome.runtime.getURL('stockfish.js'),
-          chrome.runtime.getURL('stockfish.wasm'),
-          chessUrl
+          chrome.runtime.getURL('stockfish.wasm')
         )
-      : buildBetafishWorkerBlob(chrome.runtime.getURL('betafish.js'), chessUrl);
+      : buildBetafishWorkerBlob(chrome.runtime.getURL('betafish.js'));
 
     const blobUrl = URL.createObjectURL(blob);
     try {
@@ -208,14 +181,14 @@ self.onmessage = async function(e) {
         isThinking = false;
         const fromAlg = sq120ToAlg(msg.from);
         const toAlg   = sq120ToAlg(msg.to);
-        highlightBestMove(fromAlg, toAlg, msg.side);
+        highlightBestMove(fromAlg, toAlg);
         sendLog('move', fromAlg + ' → ' + toAlg + ' (' + msg.side + ')');
         chrome.runtime.sendMessage({ type: 'RESULT' }).catch(() => {});
         break;
       }
       case 'RESULT_ALG': {
         isThinking = false;
-        highlightBestMove(msg.from, msg.to, msg.side);
+        highlightBestMove(msg.from, msg.to);
         sendLog('move', msg.from + ' → ' + msg.to + ' (' + msg.side + ')');
         chrome.runtime.sendMessage({ type: 'RESULT' }).catch(() => {});
         break;
@@ -362,7 +335,7 @@ self.onmessage = async function(e) {
 
   // ─── Hint Logic ───────────────────────────────────────────────────────────────
 
-  function getHint() {
+  async function getHint() {
     if (contextInvalid || isThinking) return;
 
     if (!qs('#board-layout-chessboard') && !qs('#board-single')) {
@@ -379,10 +352,18 @@ self.onmessage = async function(e) {
     initWorker();
     if (!worker) { sendLog('error', 'Worker failed to init'); return; }
 
-    resetHighlight();
     isThinking = true;
+    resetHighlight();
     sendLog('info', 'Computing hint…');
-    worker.postMessage({ type: 'COMPUTE', pgn: getCurrentPgn(), time: thinkingTime });
+
+    const fen = await pgnToFen(getCurrentPgn());
+    if (!fen) {
+      isThinking = false;
+      sendLog('error', 'PGN parse failed');
+      return;
+    }
+
+    worker.postMessage({ type: 'COMPUTE_FEN', fen, time: thinkingTime });
   }
 
   function safeAutoHint() {
